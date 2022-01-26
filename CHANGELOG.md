@@ -1,3 +1,24 @@
+v7.1.4
+----------
+ * Record flow on msgs
+
+v7.1.3
+----------
+ * Remove deletion of recent runs as these are no longer created
+
+v7.1.2
+----------
+ * Use run status instead of is_active and exit_type
+ * No longer include events in run archives
+
+v7.1.1
+----------
+ * Remove references to flowrun.parent_id which is no longer set by mailroom
+
+v7.1.0
+----------
+ * Remove msgs_msg.response_to_id
+
 v7.0.0
 ----------
  * Test on PG12 and 13

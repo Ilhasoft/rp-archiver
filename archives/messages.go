@@ -20,6 +20,7 @@ SELECT rec.visibility, row_to_json(rec) FROM (
 	  row_to_json(contact) as contact,
 	  CASE WHEN oo.is_anon = False THEN ccu.identity ELSE null END as urn,
 	  row_to_json(channel) as channel,
+	  row_to_json(flow) as flow,
 	  CASE WHEN direction = 'I' THEN 'in'
 		WHEN direction = 'O' THEN 'out'
 		ELSE NULL
@@ -61,6 +62,7 @@ SELECT rec.visibility, row_to_json(rec) FROM (
 	  JOIN LATERAL (select uuid, name from contacts_contact cc where cc.id = mm.contact_id) as contact ON True
 	  LEFT JOIN contacts_contacturn ccu ON mm.contact_urn_id = ccu.id
 	  LEFT JOIN LATERAL (select uuid, name from channels_channel ch where ch.id = mm.channel_id) as channel ON True
+	  LEFT JOIN LATERAL (select uuid, name from flows_flow f where f.id = mm.flow_id) as flow ON True
 	  LEFT JOIN LATERAL (select coalesce(jsonb_agg(label_row), '[]'::jsonb) as data from (select uuid, name from msgs_label ml INNER JOIN msgs_msg_labels mml ON ml.id = mml.label_id AND mml.msg_id = mm.id) as label_row) as labels_agg ON True
 
 	  WHERE mm.org_id = $1 AND mm.created_on >= $2 AND mm.created_on < $3
@@ -123,12 +125,6 @@ DELETE FROM msgs_msg_labels
 WHERE msg_id IN(?)
 `
 
-const unlinkResponses = `
-UPDATE msgs_msg 
-SET response_to_id = NULL 
-WHERE response_to_id IN(?)
-`
-
 const deleteMessages = `
 DELETE FROM msgs_msg 
 WHERE id IN(?)
@@ -189,9 +185,7 @@ func DeleteArchivedMessages(ctx context.Context, config *Config, db *sqlx.DB, s3
 	}
 	rows.Close()
 
-	log.WithFields(logrus.Fields{
-		"msg_count": len(msgIDs),
-	}).Debug("found messages")
+	log.WithField("msg_count", len(msgIDs)).Debug("found messages")
 
 	// verify we don't see more messages than there are in our archive (fewer is ok)
 	if visibleCount > archive.RecordCount {
@@ -199,18 +193,12 @@ func DeleteArchivedMessages(ctx context.Context, config *Config, db *sqlx.DB, s3
 	}
 
 	// ok, delete our messages in batches, we do this in transactions as it spans a few different queries
-	for startIdx := 0; startIdx < len(msgIDs); startIdx += deleteTransactionSize {
+	for _, idBatch := range chunkIDs(msgIDs, deleteTransactionSize) {
 		// no single batch should take more than a few minutes
 		ctx, cancel := context.WithTimeout(ctx, time.Minute*15)
 		defer cancel()
 
 		start := time.Now()
-
-		endIdx := startIdx + deleteTransactionSize
-		if endIdx > len(msgIDs) {
-			endIdx = len(msgIDs)
-		}
-		batchIDs := msgIDs[startIdx:endIdx]
 
 		// start our transaction
 		tx, err := db.BeginTxx(ctx, nil)
@@ -219,45 +207,36 @@ func DeleteArchivedMessages(ctx context.Context, config *Config, db *sqlx.DB, s3
 		}
 
 		// first update our delete_reason
-		err = executeInQuery(ctx, tx, setMessageDeleteReason, batchIDs)
+		err = executeInQuery(ctx, tx, setMessageDeleteReason, idBatch)
 		if err != nil {
-			return fmt.Errorf("error updating delete reason: %s", err.Error())
+			return errors.Wrap(err, "error updating delete reason")
 		}
 
 		// now delete any channel logs
-		err = executeInQuery(ctx, tx, deleteMessageLogs, batchIDs)
+		err = executeInQuery(ctx, tx, deleteMessageLogs, idBatch)
 		if err != nil {
-			return fmt.Errorf("error removing channel logs: %s", err.Error())
+			return errors.Wrap(err, "error removing channel logs")
 		}
 
 		// then any labels
-		err = executeInQuery(ctx, tx, deleteMessageLabels, batchIDs)
+		err = executeInQuery(ctx, tx, deleteMessageLabels, idBatch)
 		if err != nil {
-			return fmt.Errorf("error removing message labels: %s", err.Error())
-		}
-
-		// unlink any responses
-		err = executeInQuery(ctx, tx, unlinkResponses, batchIDs)
-		if err != nil {
-			return fmt.Errorf("error unlinking responses: %s", err.Error())
+			return errors.Wrap(err, "error removing message labels")
 		}
 
 		// finally, delete our messages
-		err = executeInQuery(ctx, tx, deleteMessages, batchIDs)
+		err = executeInQuery(ctx, tx, deleteMessages, idBatch)
 		if err != nil {
-			return fmt.Errorf("error deleting messages: %s", err.Error())
+			return errors.Wrap(err, "error deleting messages")
 		}
 
 		// commit our transaction
 		err = tx.Commit()
 		if err != nil {
-			return fmt.Errorf("error committing message delete transaction: %s", err.Error())
+			return errors.Wrap(err, "error committing message delete transaction")
 		}
 
-		log.WithFields(logrus.Fields{
-			"elapsed": time.Since(start),
-			"count":   len(batchIDs),
-		}).Debug("deleted batch of messages")
+		log.WithField("elapsed", time.Since(start)).WithField("count", len(idBatch)).Debug("deleted batch of messages")
 
 		cancel()
 	}
@@ -270,14 +249,12 @@ func DeleteArchivedMessages(ctx context.Context, config *Config, db *sqlx.DB, s3
 	// all went well! mark our archive as no longer needing deletion
 	_, err = db.ExecContext(outer, setArchiveDeleted, archive.ID, deletedOn)
 	if err != nil {
-		return fmt.Errorf("error setting archive as deleted: %s", err.Error())
+		return errors.Wrap(err, "error setting archive as deleted")
 	}
 	archive.NeedsDeletion = false
 	archive.DeletedOn = &deletedOn
 
-	logrus.WithFields(logrus.Fields{
-		"elapsed": time.Since(start),
-	}).Info("completed deleting messages")
+	logrus.WithField("elapsed", time.Since(start)).Info("completed deleting messages")
 
 	return nil
 }
