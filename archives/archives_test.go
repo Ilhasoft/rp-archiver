@@ -37,6 +37,7 @@ func TestGetMissingDayArchives(t *testing.T) {
 	// get the tasks for our org
 	ctx := context.Background()
 	config := NewDefaultConfig()
+
 	orgs, err := GetActiveOrgs(ctx, db, config)
 	assert.NoError(t, err)
 
@@ -85,6 +86,7 @@ func TestGetMissingMonthArchives(t *testing.T) {
 	// get the tasks for our org
 	ctx := context.Background()
 	config := NewDefaultConfig()
+
 	orgs, err := GetActiveOrgs(ctx, db, config)
 	assert.NoError(t, err)
 
@@ -318,7 +320,7 @@ func TestArchiveOrgMessages(t *testing.T) {
 	config.Delete = true
 
 	// AWS S3 config in the environment needed to download from S3
-	if config.AWSAccessKeyID != "missing_aws_access_key_id" && config.AWSSecretAccessKey != "missing_aws_secret_access_key" {
+	if config.AWSAccessKeyID != "" && config.AWSSecretAccessKey != "" {
 		s3Client, err := NewS3Client(config)
 		assert.NoError(t, err)
 
@@ -437,7 +439,7 @@ func TestArchiveOrgRuns(t *testing.T) {
 	config.Delete = true
 
 	// AWS S3 config in the environment needed to download from S3
-	if config.AWSAccessKeyID != "missing_aws_access_key_id" && config.AWSSecretAccessKey != "missing_aws_secret_access_key" {
+	if config.AWSAccessKeyID != "" && config.AWSSecretAccessKey != "" {
 		s3Client, err := NewS3Client(config)
 		assert.NoError(t, err)
 
@@ -526,7 +528,7 @@ func TestArchiveActiveOrgs(t *testing.T) {
 	dates.SetNowSource(dates.NewSequentialNowSource(time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)))
 	defer dates.SetNowSource(dates.DefaultNowSource)
 
-	if config.AWSAccessKeyID != "missing_aws_access_key_id" && config.AWSSecretAccessKey != "missing_aws_secret_access_key" {
+	if config.AWSAccessKeyID != "" && config.AWSSecretAccessKey != "" {
 		s3Client, err := NewS3Client(config)
 		assert.NoError(t, err)
 
