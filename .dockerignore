@@ -1,0 +1,15 @@
+.git
+.github
+.vscode
+.*ignore
+.env
+docker-compose*.yml
+Dockerfile*
+docker/
+**/*_test.go
+Makefile
+*.sql
+*.md
+*.sh
+*.dump
+LICENSE
