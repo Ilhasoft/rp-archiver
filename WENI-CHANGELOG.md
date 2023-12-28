@@ -1,3 +1,7 @@
+1.2.3-archiver-7.5.0
+----------
+ * Update to rp-archiver v7.5.0
+
 1.2.3-archiver-7.4.0
 ----------
  * Update to rp-archiver v7.4.0
