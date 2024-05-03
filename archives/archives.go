@@ -321,7 +321,7 @@ func GetMissingMonthlyArchives(ctx context.Context, db *sqlx.DB, now time.Time, 
 
 // BuildRollupArchive builds a monthly archive from the files present on S3
 func BuildRollupArchive(ctx context.Context, db *sqlx.DB, conf *Config, s3Client s3iface.S3API, monthlyArchive *Archive, now time.Time, org Org, archiveType ArchiveType) error {
-	ctx, cancel := context.WithTimeout(ctx, time.Hour)
+	ctx, cancel := context.WithTimeout(ctx, time.Hour*time.Duration(conf.BuildRollupArchiveTimeout))
 	defer cancel()
 
 	start := dates.Now()
@@ -771,7 +771,7 @@ func createArchives(ctx context.Context, db *sqlx.DB, config *Config, s3Client s
 
 // RollupOrgArchives rolls up monthly archives from our daily archives
 func RollupOrgArchives(ctx context.Context, now time.Time, config *Config, db *sqlx.DB, s3Client s3iface.S3API, org Org, archiveType ArchiveType) ([]*Archive, []*Archive, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Hour*3)
+	ctx, cancel := context.WithTimeout(ctx, time.Hour*time.Duration(config.RollupOrgTimeout))
 	defer cancel()
 
 	log := logrus.WithFields(logrus.Fields{"org_id": org.ID, "org_name": org.Name, "archive_type": archiveType})
