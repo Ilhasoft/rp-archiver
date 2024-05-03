@@ -31,6 +31,9 @@ type Config struct {
 	LibratoUsername string `help:"the username that will be used to authenticate to Librato"`
 	LibratoToken    string `help:"the token that will be used to authenticate to Librato"`
 	InstanceName    string `help:"the unique name of this instance used for analytics"`
+
+	RollupOrgTimeout          int `help:"rollup timeout for all org archives, limit in hours (default 3)"`
+	BuildRollupArchiveTimeout int `help:"rollup for single archive timeout, limit in hours (default 1)"`
 }
 
 // NewDefaultConfig returns a new default configuration object
@@ -62,6 +65,9 @@ func NewDefaultConfig() *Config {
 		Once:            false,
 
 		InstanceName: hostname,
+
+		RollupOrgTimeout:          3,
+		BuildRollupArchiveTimeout: 1,
 	}
 
 	return &config
