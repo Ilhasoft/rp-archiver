@@ -1,3 +1,7 @@
+1.2.4-archiver-7.5.0
+----------
+ * Configuration for rollup timeouts
+
 1.2.3-archiver-7.5.0
 ----------
  * Update to rp-archiver v7.5.0
