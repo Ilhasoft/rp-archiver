@@ -3,7 +3,7 @@ package archives
 import (
 	"compress/gzip"
 	"context"
-	"io/ioutil"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -18,10 +18,10 @@ import (
 )
 
 func setup(t *testing.T) *sqlx.DB {
-	testDB, err := ioutil.ReadFile("../testdb.sql")
+	testDB, err := os.ReadFile("../testdb.sql")
 	assert.NoError(t, err)
 
-	db, err := sqlx.Open("postgres", "postgres://temba:temba@localhost:5432/archiver_test?sslmode=disable&TimeZone=UTC")
+	db, err := sqlx.Open("postgres", "postgres://archiver_test:temba@localhost:5432/archiver_test?sslmode=disable&TimeZone=UTC")
 	assert.NoError(t, err)
 
 	_, err = db.Exec(string(testDB))
@@ -40,25 +40,26 @@ func TestGetMissingDayArchives(t *testing.T) {
 
 	orgs, err := GetActiveOrgs(ctx, db, config)
 	assert.NoError(t, err)
+	assert.Len(t, orgs, 3)
 
 	now := time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)
 
 	// org 1 is too new, no tasks
 	tasks, err := GetMissingDailyArchives(ctx, db, now, orgs[0], MessageType)
 	assert.NoError(t, err)
-	assert.Equal(t, 0, len(tasks))
+	assert.Len(t, tasks, 0)
 
 	// org 2 should have some
 	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[1], MessageType)
 	assert.NoError(t, err)
-	assert.Equal(t, 61, len(tasks))
+	assert.Len(t, tasks, 61)
 	assert.Equal(t, time.Date(2017, 8, 10, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
 	assert.Equal(t, time.Date(2017, 10, 10, 0, 0, 0, 0, time.UTC), tasks[60].StartDate)
 
 	// org 3 is the same as 2, but two of the tasks have already been built
 	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[2], MessageType)
 	assert.NoError(t, err)
-	assert.Equal(t, 31, len(tasks))
+	assert.Len(t, tasks, 31)
 	assert.Equal(t, time.Date(2017, 8, 11, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
 	assert.Equal(t, time.Date(2017, 10, 1, 0, 0, 0, 0, time.UTC), tasks[21].StartDate)
 	assert.Equal(t, time.Date(2017, 10, 10, 0, 0, 0, 0, time.UTC), tasks[30].StartDate)
@@ -67,13 +68,13 @@ func TestGetMissingDayArchives(t *testing.T) {
 	orgs[2].RetentionPeriod = 200
 	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[2], MessageType)
 	assert.NoError(t, err)
-	assert.Equal(t, 0, len(tasks))
+	assert.Len(t, tasks, 0)
 
 	// org 1 again, but lowering the archive period so we have tasks
 	orgs[0].RetentionPeriod = 2
 	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[0], MessageType)
 	assert.NoError(t, err)
-	assert.Equal(t, 58, len(tasks))
+	assert.Len(t, tasks, 58)
 	assert.Equal(t, time.Date(2017, 11, 10, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
 	assert.Equal(t, time.Date(2017, 12, 1, 0, 0, 0, 0, time.UTC), tasks[21].StartDate)
 	assert.Equal(t, time.Date(2017, 12, 10, 0, 0, 0, 0, time.UTC), tasks[30].StartDate)
@@ -147,9 +148,9 @@ func TestCreateMsgArchive(t *testing.T) {
 
 	// should have two records, second will have attachments
 	assert.Equal(t, 3, task.RecordCount)
-	assert.Equal(t, int64(528), task.Size)
+	assert.Equal(t, int64(522), task.Size)
 	assert.Equal(t, time.Date(2017, 8, 12, 0, 0, 0, 0, time.UTC), task.StartDate)
-	assert.Equal(t, "b3bf00bf1234ea47f14ffd0171a8ead0", task.Hash)
+	assert.Equal(t, "c2c12d94eb758a3c06c5c4e0706934ff", task.Hash)
 	assertArchiveFile(t, task, "messages1.jsonl")
 
 	DeleteArchiveFile(task)
@@ -167,8 +168,8 @@ func TestCreateMsgArchive(t *testing.T) {
 
 	// should have one record
 	assert.Equal(t, 1, task.RecordCount)
-	assert.Equal(t, int64(294), task.Size)
-	assert.Equal(t, "bd163ead077774425aa559e30d48ca87", task.Hash)
+	assert.Equal(t, int64(293), task.Size)
+	assert.Equal(t, "c8245a44279102a1612170df3787c32d", task.Hash)
 	assertArchiveFile(t, task, "messages2.jsonl")
 
 	DeleteArchiveFile(task)
@@ -180,10 +181,10 @@ func assertArchiveFile(t *testing.T, archive *Archive, truthName string) {
 
 	zTestReader, err := gzip.NewReader(testFile)
 	assert.NoError(t, err)
-	test, err := ioutil.ReadAll(zTestReader)
+	test, err := io.ReadAll(zTestReader)
 	assert.NoError(t, err)
 
-	truth, err := ioutil.ReadFile("./testdata/" + truthName)
+	truth, err := os.ReadFile("./testdata/" + truthName)
 	assert.NoError(t, err)
 
 	assert.Equal(t, truth, test)
@@ -332,14 +333,14 @@ func TestArchiveOrgMessages(t *testing.T) {
 		assert.Equal(t, 61, len(dailiesCreated))
 		assertArchive(t, dailiesCreated[0], time.Date(2017, 8, 10, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
 		assertArchive(t, dailiesCreated[1], time.Date(2017, 8, 11, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
-		assertArchive(t, dailiesCreated[2], time.Date(2017, 8, 12, 0, 0, 0, 0, time.UTC), DayPeriod, 3, 528, "b3bf00bf1234ea47f14ffd0171a8ead0")
-		assertArchive(t, dailiesCreated[3], time.Date(2017, 8, 13, 0, 0, 0, 0, time.UTC), DayPeriod, 1, 312, "32e61b1431217b59fca0170f637d78a3")
+		assertArchive(t, dailiesCreated[2], time.Date(2017, 8, 12, 0, 0, 0, 0, time.UTC), DayPeriod, 3, 522, "c2c12d94eb758a3c06c5c4e0706934ff")
+		assertArchive(t, dailiesCreated[3], time.Date(2017, 8, 13, 0, 0, 0, 0, time.UTC), DayPeriod, 1, 311, "9eaec21e28af92bc338d9b6bcd712109")
 		assertArchive(t, dailiesCreated[4], time.Date(2017, 8, 14, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
 
 		assert.Equal(t, 0, len(dailiesFailed))
 
 		assert.Equal(t, 2, len(monthliesCreated))
-		assertArchive(t, monthliesCreated[0], time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 4, 553, "156e45e29b6587cb85ccf75e03800b00")
+		assertArchive(t, monthliesCreated[0], time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 4, 545, "d4ce6331f3c871d394ed3b916144ac85")
 		assertArchive(t, monthliesCreated[1], time.Date(2017, 9, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
 
 		assert.Equal(t, 0, len(monthliesFailed))

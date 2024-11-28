@@ -1,3 +1,47 @@
+v8.2.0 (2023-07-31)
+-------------------------
+ * Update .gitignore
+
+v8.1.7 (2023-06-06)
+-------------------------
+ * Fix release CHANGELOG generation
+
+v8.1.6 (2023-06-06)
+-------------------------
+ * Remove deleting of channel logs as these are no longer linked to messages
+
+v8.1.5 (2023-03-24)
+-------------------------
+ * Revert to go 1.19
+
+v8.1.4 (2023-03-15)
+-------------------------
+ * Match API and always return type=text|voice for messages
+
+v8.1.3 (2023-03-09)
+-------------------------
+ * Update dependencies and use go 1.20
+ * Update test database schema and cleanup sql queries
+
+v8.1.2 (2023-02-20)
+-------------------------
+ * Add support for msg_type = T
+
+v8.1.1 (2023-02-15)
+-------------------------
+ * Don't try to delete broadcast URNs which no longer exist
+
+v8.1.0 (2023-01-18)
+-------------------------
+ * Delete old flow starts after deleting runs
+
+v8.0.0 (2023-01-09)
+-------------------------
+ * Only fetch broadcasts which don't have messages
+ * Remove use of deprecated ioutil package
+ * Update testdb.sql to reflect schema changes and cleanup sql variables
+ * Test against postgres 14
+
 v7.5.0
 ----------
  * Use go 1.19
