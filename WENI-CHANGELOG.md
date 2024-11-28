@@ -1,3 +1,7 @@
+1.2.4-archiver-8.2.0
+----------
+ * Merge rp-archiver v8.2.0
+
 1.2.4-archiver-7.5.0
 ----------
  * Configuration for rollup timeouts
