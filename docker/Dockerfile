@@ -1,4 +1,4 @@
-FROM golang:1.17.3-alpine3.14
+FROM golang:1.19-alpine3.18 AS builder
 
 WORKDIR /app
 
@@ -6,15 +6,16 @@ RUN apk update \
   && apk add --virtual build-deps gcc git \
   && rm -rf /var/cache/apk/*
 
-RUN addgroup -S golang \
-  && adduser -S -G golang golang
-
 COPY . .
 
-RUN go install -v ./cmd/...
-RUN chown -R golang /app
+RUN --mount=type=cache,target=/go/pkg/mod/ \
+  go install -v ./cmd/...
 
-USER golang
+FROM alpine:3.18
+
+COPY --from=builder /go/bin/ /app/
+
+WORKDIR /app
 
 EXPOSE 8080
-ENTRYPOINT ["rp-archiver"]
+ENTRYPOINT ["./rp-archiver"]
