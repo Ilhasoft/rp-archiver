@@ -28,7 +28,12 @@ SELECT rec.visibility, row_to_json(rec) FROM (
 		row_to_json(channel) as channel,
 		row_to_json(flow) as flow,
 		CASE WHEN direction = 'I' THEN 'in' WHEN direction = 'O' THEN 'out' ELSE NULL END AS direction,
-		CASE WHEN msg_type = 'V' THEN 'voice' ELSE 'text' END AS "type",
+		CASE 
+			WHEN msg_type = 'T' THEN 'text'
+			WHEN msg_type = 'O' THEN 'optin'
+			WHEN msg_type = 'V' THEN 'voice'
+			ELSE NULL 
+		END AS "type",
 		CASE 
 			WHEN status = 'I' THEN 'initializing'
 			WHEN status = 'P' THEN 'queued'
@@ -124,15 +129,19 @@ func DeleteArchivedMessages(ctx context.Context, config *Config, db *sqlx.DB, s3
 	})
 	log.Info("deleting messages")
 
-	// first things first, make sure our file is present on S3
-	md5, err := GetS3FileETAG(outer, s3Client, archive.URL)
+	// first things first, make sure our file is correct on S3
+	s3Size, s3Hash, err := GetS3FileInfo(outer, s3Client, archive.URL)
 	if err != nil {
 		return err
 	}
 
-	// if our etag and archive md5 don't match, that's an error, return
-	if md5 != archive.Hash {
-		return fmt.Errorf("archive md5: %s and s3 etag: %s do not match", archive.Hash, md5)
+	if s3Size != archive.Size {
+		return fmt.Errorf("archive size: %d and s3 size: %d do not match", archive.Size, s3Size)
+	}
+
+	// if S3 hash is MD5 then check against archive hash
+	if config.CheckS3Hashes && archive.Size <= maxSingleUploadBytes && s3Hash != archive.Hash {
+		return fmt.Errorf("archive md5: %s and s3 etag: %s do not match", archive.Hash, s3Hash)
 	}
 
 	// ok, archive file looks good, let's build up our list of message ids, this may be big but we are int64s so shouldn't be too big
@@ -225,7 +234,7 @@ func DeleteArchivedMessages(ctx context.Context, config *Config, db *sqlx.DB, s3
 const sqlSelectOldOrgBroadcasts = `
 SELECT id
   FROM msgs_broadcast b
- WHERE b.org_id = $1 AND b.created_on < $2 AND b.schedule_id IS NULL AND NOT EXISTS (SELECT 1 FROM msgs_msg WHERE broadcast_id = b.id)
+ WHERE b.org_id = $1 AND b.created_on < $2 AND b.schedule_id IS NULL AND b.is_active AND NOT EXISTS (SELECT 1 FROM msgs_msg WHERE broadcast_id = b.id)
  LIMIT 1000000;`
 
 // DeleteBroadcasts deletes all broadcasts older than 90 days for the passed in org which have no associated messages
