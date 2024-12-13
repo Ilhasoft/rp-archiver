@@ -1,3 +1,29 @@
+v9.0.0 (2024-01-05)
+-------------------------
+ * Update dependencies
+
+v8.3.4 (2023-11-08)
+-------------------------
+ * Fix deleting of broadcasts so we don't include deleted scheduled broadcasts
+
+v8.3.3 (2023-09-26)
+-------------------------
+ * Allow disabling of hash checking
+ * Fix checking S3 uploads so that we always check size but only check hash for files uploaded as single part
+
+v8.3.2 (2023-09-25)
+-------------------------
+ * Update to go 1.21
+
+v8.3.1 (2023-09-19)
+-------------------------
+ * Add support for optin type messages
+ * Update deps and go version for CI
+
+v8.3.0 (2023-08-10)
+-------------------------
+ * Update to go 1.20
+
 v8.2.0 (2023-07-31)
 -------------------------
  * Update .gitignore

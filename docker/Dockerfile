@@ -1,21 +1,19 @@
-FROM golang:1.19-alpine3.18 AS builder
+FROM golang:1.23-bookworm AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download -x
+
+COPY . ./
+
+RUN GOOS=linux GOARCH=amd64 go build -o /bin/rp-archiver ./cmd/rp-archiver/*.go
+
+FROM gcr.io/distroless/base-debian12
 
 WORKDIR /app
 
-RUN apk update \
-  && apk add --virtual build-deps gcc git \
-  && rm -rf /var/cache/apk/*
-
-COPY . .
-
-RUN --mount=type=cache,target=/go/pkg/mod/ \
-  go install -v ./cmd/...
-
-FROM alpine:3.18
-
-COPY --from=builder /go/bin/ /app/
-
-WORKDIR /app
+COPY --from=builder bin/rp-archiver ./
 
 EXPOSE 8080
 ENTRYPOINT ["./rp-archiver"]
