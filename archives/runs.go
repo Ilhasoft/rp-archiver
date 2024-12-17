@@ -4,13 +4,12 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 	"github.com/jmoiron/sqlx"
 	"github.com/nyaruka/gocommon/dates"
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -48,14 +47,11 @@ FROM (
         WHEN status = 'X' THEN 'expired'
         WHEN status = 'F' THEN 'failed'
         ELSE NULL
-	 END as exit_type,
- 	 a.username as submitted_by
+	 END as exit_type
 
    FROM flows_flowrun fr
-     LEFT JOIN auth_user a ON a.id = fr.submitted_by_id
-     JOIN LATERAL (SELECT uuid, name FROM flows_flow WHERE flows_flow.id = fr.flow_id) AS flow_struct ON True
-     JOIN LATERAL (SELECT uuid, name FROM contacts_contact cc WHERE cc.id = fr.contact_id) AS contact_struct ON True
-   
+   JOIN LATERAL (SELECT uuid, name FROM flows_flow WHERE flows_flow.id = fr.flow_id) AS flow_struct ON True
+   JOIN LATERAL (SELECT uuid, name FROM contacts_contact cc WHERE cc.id = fr.contact_id) AS contact_struct ON True
    WHERE fr.org_id = $1 AND fr.modified_on >= $2 AND fr.modified_on < $3
    ORDER BY fr.modified_on ASC, id ASC
 ) as rec;`
@@ -65,7 +61,7 @@ func writeRunRecords(ctx context.Context, db *sqlx.DB, archive *Archive, writer 
 	var rows *sqlx.Rows
 	rows, err := db.QueryxContext(ctx, sqlLookupRuns, archive.Org.ID, archive.StartDate, archive.endDate())
 	if err != nil {
-		return 0, errors.Wrapf(err, "error querying run records for org: %d", archive.Org.ID)
+		return 0, fmt.Errorf("error querying run records for org: %d: %w", archive.Org.ID, err)
 	}
 	defer rows.Close()
 
@@ -79,7 +75,7 @@ func writeRunRecords(ctx context.Context, db *sqlx.DB, archive *Archive, writer 
 		err = rows.Scan(&runUUID, &runExitedOn, &record)
 
 		if err != nil {
-			return 0, errors.Wrapf(err, "error scanning run record for org: %d", archive.Org.ID)
+			return 0, fmt.Errorf("error scanning run record for org: %d: %w", archive.Org.ID, err)
 		}
 
 		// shouldn't be archiving an active run, that's an error
@@ -114,14 +110,14 @@ func DeleteArchivedRuns(ctx context.Context, config *Config, db *sqlx.DB, s3Clie
 	defer cancel()
 
 	start := dates.Now()
-	log := logrus.WithFields(logrus.Fields{
-		"id":           archive.ID,
-		"org_id":       archive.OrgID,
-		"start_date":   archive.StartDate,
-		"end_date":     archive.endDate(),
-		"archive_type": archive.ArchiveType,
-		"total_count":  archive.RecordCount,
-	})
+	log := slog.With(
+		"id", archive.ID,
+		"org_id", archive.OrgID,
+		"start_date", archive.StartDate,
+		"end_date", archive.endDate(),
+		"archive_type", archive.ArchiveType,
+		"total_count", archive.RecordCount,
+	)
 	log.Info("deleting runs")
 
 	// first things first, make sure our file is correct on S3
@@ -167,7 +163,7 @@ func DeleteArchivedRuns(ctx context.Context, config *Config, db *sqlx.DB, s3Clie
 	}
 	rows.Close()
 
-	log.WithField("run_count", len(runIDs)).Debug("found runs")
+	log.Debug("found runs", "run_count", len(runIDs))
 
 	// verify we don't see more runs than there are in our archive (fewer is ok)
 	if runCount > archive.RecordCount {
@@ -191,16 +187,16 @@ func DeleteArchivedRuns(ctx context.Context, config *Config, db *sqlx.DB, s3Clie
 		// delete our runs
 		err = executeInQuery(ctx, tx, sqlDeleteRuns, idBatch)
 		if err != nil {
-			return errors.Wrap(err, "error deleting runs")
+			return fmt.Errorf("error deleting runs: %w", err)
 		}
 
 		// commit our transaction
 		err = tx.Commit()
 		if err != nil {
-			return errors.Wrap(err, "error committing run delete transaction")
+			return fmt.Errorf("error committing run delete transaction: %w", err)
 		}
 
-		log.WithField("elapsed", dates.Since(start)).WithField("count", len(idBatch)).Debug("deleted batch of runs")
+		log.Debug("deleted batch of runs", "elapsed", dates.Since(start), "count", len(idBatch))
 
 		cancel()
 	}
@@ -213,12 +209,12 @@ func DeleteArchivedRuns(ctx context.Context, config *Config, db *sqlx.DB, s3Clie
 	// all went well! mark our archive as no longer needing deletion
 	_, err = db.ExecContext(outer, sqlUpdateArchiveDeleted, archive.ID, deletedOn)
 	if err != nil {
-		return errors.Wrap(err, "error setting archive as deleted")
+		return fmt.Errorf("error setting archive as deleted: %w", err)
 	}
 	archive.NeedsDeletion = false
 	archive.DeletedOn = &deletedOn
 
-	logrus.WithField("elapsed", dates.Since(start)).Info("completed deleting runs")
+	slog.Info("completed deleting runs", "elapsed", dates.Since(start))
 
 	return nil
 }
@@ -243,7 +239,7 @@ func DeleteFlowStarts(ctx context.Context, now time.Time, config *Config, db *sq
 	count := 0
 	for rows.Next() {
 		if count == 0 {
-			logrus.WithField("org_id", org.ID).Info("deleting starts")
+			slog.Info("deleting starts", "org_id", org.ID)
 		}
 
 		// been deleting this org more than an hour? thats enough for today, exit out
@@ -253,60 +249,60 @@ func DeleteFlowStarts(ctx context.Context, now time.Time, config *Config, db *sq
 
 		var startID int64
 		if err := rows.Scan(&startID); err != nil {
-			return errors.Wrap(err, "unable to get start id")
+			return fmt.Errorf("unable to get start id: %w", err)
 		}
 
 		// we delete starts in a transaction per start
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			return errors.Wrapf(err, "error starting transaction while deleting start: %d", startID)
+			return fmt.Errorf("error starting transaction while deleting start: %d: %w", startID, err)
 		}
 
 		// delete contacts M2M
 		_, err = tx.Exec(`DELETE from flows_flowstart_contacts WHERE flowstart_id = $1`, startID)
 		if err != nil {
 			tx.Rollback()
-			return errors.Wrapf(err, "error deleting related contacts for start: %d", startID)
+			return fmt.Errorf("error deleting related contacts for start: %d: %w", startID, err)
 		}
 
 		// delete groups M2M
 		_, err = tx.Exec(`DELETE from flows_flowstart_groups WHERE flowstart_id = $1`, startID)
 		if err != nil {
 			tx.Rollback()
-			return errors.Wrapf(err, "error deleting related groups for start: %d", startID)
+			return fmt.Errorf("error deleting related groups for start: %d: %w", startID, err)
 		}
 
 		// delete calls M2M
 		_, err = tx.Exec(`DELETE from flows_flowstart_calls WHERE flowstart_id = $1`, startID)
 		if err != nil {
 			tx.Rollback()
-			return errors.Wrapf(err, "error deleting related calls for start: %d", startID)
+			return fmt.Errorf("error deleting related calls for start: %d: %w", startID, err)
 		}
 
 		// delete counts
 		_, err = tx.Exec(`DELETE from flows_flowstartcount WHERE start_id = $1`, startID)
 		if err != nil {
 			tx.Rollback()
-			return errors.Wrapf(err, "error deleting counts for start: %d", startID)
+			return fmt.Errorf("error deleting counts for start: %d: %w", startID, err)
 		}
 
 		// finally, delete our start
 		_, err = tx.Exec(`DELETE from flows_flowstart WHERE id = $1`, startID)
 		if err != nil {
 			tx.Rollback()
-			return errors.Wrapf(err, "error deleting start: %d", startID)
+			return fmt.Errorf("error deleting start: %d: %w", startID, err)
 		}
 
 		err = tx.Commit()
 		if err != nil {
-			return errors.Wrapf(err, "error deleting start: %d", startID)
+			return fmt.Errorf("error deleting start: %d: %w", startID, err)
 		}
 
 		count++
 	}
 
 	if count > 0 {
-		logrus.WithFields(logrus.Fields{"elapsed": dates.Since(start), "count": count, "org_id": org.ID}).Info("completed deleting starts")
+		slog.Info("completed deleting starts", "elapsed", dates.Since(start), "count", count, "org_id", org.ID)
 	}
 
 	return nil

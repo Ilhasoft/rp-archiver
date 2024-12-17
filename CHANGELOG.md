@@ -1,3 +1,23 @@
+v9.2.0 (2024-07-17)
+-------------------------
+ * Update dependencies
+ * Test against PostgreSQL 15
+
+v9.1.2 (2024-06-04)
+-------------------------
+ * Update deps
+ * Use std lib errors
+
+v9.1.1 (2024-04-25)
+-------------------------
+ * Add support for status=READ
+
+v9.1.0 (2024-04-12)
+-------------------------
+ * Remove flows_flowrun.submitted_by
+ * Replace logrus with slog
+ * Update to go 1.22 and update deps
+
 v9.0.0 (2024-01-05)
 -------------------------
  * Update dependencies
