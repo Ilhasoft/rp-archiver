@@ -14,6 +14,7 @@ DROP TABLE IF EXISTS msgs_broadcast CASCADE;
 DROP TABLE IF EXISTS msgs_label CASCADE;
 DROP TABLE IF EXISTS msgs_msg_labels CASCADE;
 DROP TABLE IF EXISTS msgs_msg CASCADE;
+DROP TABLE IF EXISTS msgs_optin CASCADE;
 DROP TABLE IF EXISTS ivr_call CASCADE;
 DROP TABLE IF EXISTS contacts_contacturn CASCADE;
 DROP TABLE IF EXISTS contacts_contactgroup_contacts CASCADE;
@@ -28,6 +29,11 @@ CREATE TABLE orgs_org (
     is_anon boolean NOT NULL,
     is_active boolean NOT NULL,
     created_on timestamp with time zone NOT NULL
+);
+
+CREATE TABLE auth_user (
+    id serial primary key,
+    username character varying(128) NOT NULL
 );
 
 CREATE TABLE channels_channel (
@@ -84,33 +90,6 @@ CREATE TABLE flows_flow (
     name character varying(128) NOT NULL
 );
 
-CREATE TABLE msgs_msg (
-    id serial primary key,
-    uuid uuid NULL,
-    org_id integer NOT NULL REFERENCES orgs_org(id),
-    broadcast_id integer NULL,
-    text text NOT NULL,
-    high_priority boolean NULL,
-    created_on timestamp with time zone NOT NULL,
-    modified_on timestamp with time zone NOT NULL,
-    sent_on timestamp with time zone,
-    queued_on timestamp with time zone,
-    direction character varying(1) NOT NULL,
-    status character varying(1) NOT NULL,
-    visibility character varying(1) NOT NULL,
-    msg_type character varying(1),
-    msg_count integer NOT NULL,
-    error_count integer NOT NULL,
-    next_attempt timestamp with time zone NOT NULL,
-    external_id character varying(255),
-    attachments character varying(255)[],
-    channel_id integer REFERENCES channels_channel(id),
-    contact_id integer NOT NULL REFERENCES contacts_contact(id),
-    contact_urn_id integer NULL REFERENCES contacts_contacturn(id),
-    flow_id integer NULL REFERENCES flows_flow(id),
-    metadata text
-);
-
 CREATE TABLE msgs_broadcast (
     id serial primary key,
     org_id integer NOT NULL REFERENCES orgs_org(id),
@@ -138,6 +117,46 @@ CREATE TABLE msgs_broadcastmsgcount (
     broadcast_id integer NOT NULL REFERENCES msgs_broadcast(id)
 );
 
+CREATE TABLE msgs_optin (
+    id serial PRIMARY KEY,
+    uuid uuid NOT NULL,
+    org_id integer NOT NULL REFERENCES orgs_org(id) ON DELETE CASCADE,
+    name character varying(64)
+);
+
+CREATE TABLE msgs_msg (
+    id bigserial PRIMARY KEY,
+    uuid uuid NOT NULL,
+    org_id integer NOT NULL REFERENCES orgs_org(id) ON DELETE CASCADE,
+    channel_id integer REFERENCES channels_channel(id) ON DELETE CASCADE,
+    contact_id integer NOT NULL REFERENCES contacts_contact(id) ON DELETE CASCADE,
+    contact_urn_id integer REFERENCES contacts_contacturn(id) ON DELETE CASCADE,
+    broadcast_id integer REFERENCES msgs_broadcast(id) ON DELETE CASCADE,
+    flow_id integer REFERENCES flows_flow(id) ON DELETE CASCADE,
+    --ticket_id integer REFERENCES tickets_ticket(id) ON DELETE CASCADE,
+    created_by_id integer REFERENCES auth_user(id) ON DELETE CASCADE,
+    text text NOT NULL,
+    attachments character varying(255)[] NULL,
+    quick_replies character varying(64)[] NULL,
+    optin_id integer REFERENCES msgs_optin(id) ON DELETE CASCADE,
+    locale character varying(6) NULL,
+    created_on timestamp with time zone NOT NULL,
+    modified_on timestamp with time zone NOT NULL,
+    sent_on timestamp with time zone,
+    msg_type character varying(1) NOT NULL,
+    direction character varying(1) NOT NULL,
+    status character varying(1) NOT NULL,
+    visibility character varying(1) NOT NULL,
+    msg_count integer NOT NULL,
+    high_priority boolean NULL,
+    error_count integer NOT NULL,
+    next_attempt timestamp with time zone NOT NULL,
+    failed_reason character varying(1),
+    external_id character varying(255),
+    metadata text,
+    log_uuids uuid[]
+);
+
 CREATE TABLE msgs_label (
     id serial primary key,
     uuid character varying(36) NULL,
@@ -148,11 +167,6 @@ CREATE TABLE msgs_msg_labels (
     id serial primary key,
     msg_id integer NOT NULL REFERENCES msgs_msg(id),
     label_id integer NOT NULL REFERENCES msgs_label(id)
-);
-
-CREATE TABLE auth_user (
-    id serial primary key,
-    username character varying(128) NOT NULL
 );
 
 CREATE TABLE ivr_call (
@@ -198,7 +212,6 @@ CREATE TABLE flows_flowrun (
     created_on timestamp with time zone NOT NULL,
     modified_on timestamp with time zone NOT NULL,
     exited_on timestamp with time zone NULL,
-    submitted_by_id integer NULL REFERENCES auth_user(id),
     status varchar(1) NOT NULL,
     delete_from_results boolean
 );
@@ -322,23 +335,23 @@ INSERT INTO flows_flowstart_groups(flowstart_id, contactgroup_id) VALUES
 INSERT INTO flows_flowstart_calls(flowstart_id, call_id) VALUES 
 (1, 1);
 
-INSERT INTO flows_flowrun(id, uuid, org_id, responded, contact_id, flow_id, results, path, created_on, modified_on, exited_on, status, submitted_by_id, start_id) VALUES
-(1, '4ced1260-9cfe-4b7f-81dd-b637108f15b9', 2, TRUE, 6, 1, '{}', '[]', '2017-08-12 21:11:59.890662+02:00','2017-08-12 21:11:59.890662+02:00','2017-08-12 21:11:59.890662+02:00', 'C', NULL, 1),
+INSERT INTO flows_flowrun(id, uuid, org_id, responded, contact_id, flow_id, results, path, created_on, modified_on, exited_on, status, start_id) VALUES
+(1, '4ced1260-9cfe-4b7f-81dd-b637108f15b9', 2, TRUE, 6, 1, '{}', '[]', '2017-08-12 21:11:59.890662+02:00','2017-08-12 21:11:59.890662+02:00','2017-08-12 21:11:59.890662+02:00', 'C', 1),
 (2, '7d68469c-0494-498a-bdf3-bac68321fd6d', 2, TRUE, 6, 1, 
 '{"agree": {"category": "Strongly agree", "node_uuid": "a0434c54-3e26-4eb0-bafc-46cdeaf435ac", "name": "Do you agree?", "value": "A", "created_on": "2017-05-03T12:25:21.714339+00:00", "input": "A"}}',
 '[{"uuid": "c3d0b417-db75-417c-8050-33776ec8f620", "node_uuid": "10896d63-8df7-4022-88dd-a9d93edf355b", "arrived_on": "2017-08-12T15:07:24.049815+02:00", "exit_uuid": "2f890507-2ad2-4bd1-92fc-0ca031155fca"}]', 
-'2017-08-12 21:11:59.890662+02:00','2017-08-12 21:11:59.890662+02:00','2017-08-12 21:11:59.890662+02:00', 'C', NULL, NULL),
+'2017-08-12 21:11:59.890662+02:00','2017-08-12 21:11:59.890662+02:00','2017-08-12 21:11:59.890662+02:00', 'C', NULL),
 (3, 'de782b35-a398-46ed-8550-34c66053841b', 3, TRUE, 7, 2, 
 '{"agree": {"category": "Strongly agree", "node_uuid": "084c8cf1-715d-4d0a-b38d-a616ed74e638", "name": "Agree", "value": "A", "created_on": "2017-05-03T12:25:21.714339+00:00", "input": "A"}, "confirm_agree": {"category": "Confirmed Strongly agree", "node_uuid": "a0434c54-3e26-4eb0-bafc-46cdeaf435ab", "name": "Do you agree?", "value": "A", "created_on": "2017-05-03T12:25:21.714339+00:00", "input": "A"}}',
 '[{"uuid": "600ac5b4-4895-4161-ad97-6e2f1bb48bcb", "node_uuid": "accbc6e2-b0df-46cd-9a76-bff0fdf4d753", "arrived_on": "2017-08-12T15:07:24.049815+02:00", "exit_uuid": "8249e2dc-c893-4200-b6d2-398d07a459bc"}]', 
-'2017-08-10 21:11:59.890662+02:00','2017-08-10 21:11:59.890662+02:00','2017-08-10 21:11:59.890662+02:00', 'C', 1, NULL),
+'2017-08-10 21:11:59.890662+02:00','2017-08-10 21:11:59.890662+02:00','2017-08-10 21:11:59.890662+02:00', 'C', NULL),
 (4, '329a5d24-64fc-479c-8d24-9674c9b46530', 3, TRUE, 7, 2, 
 '{"agree": {"category": "Disagree", "node_uuid": "084c8cf1-715d-4d0a-b38d-a616ed74e638", "name": "Agree", "value": "B", "created_on": "2017-10-10T12:25:21.714339+00:00", "input": "B"}}',
 '[{"uuid": "babf4fc8-e12c-4bb9-a9dd-61178a118b5a", "node_uuid": "accbc6e2-b0df-46cd-9a76-bff0fdf4d753", "arrived_on": "2017-10-12T15:07:24.049815+02:00", "exit_uuid": "8249e2dc-c893-4200-b6d2-398d07a459bc"}]', 
-'2017-10-10 21:11:59.890662+02:00','2017-10-10 21:11:59.890662+02:00','2017-10-10 21:11:59.890662+02:00', 'C', NULL, NULL),
-(5, 'abed67d2-06b8-4749-8bb9-ecda037b673b', 3, TRUE, 7, 2, '{}', '[]', '2017-10-10 21:11:59.890663+02:00','2017-10-10 21:11:59.890662+02:00','2017-10-10 21:11:59.890662+02:00', 'C', NULL, NULL),
-(6, '6262eefe-a6e9-4201-9b76-a7f25e3b7f29', 3, TRUE, 7, 2, '{}', '[]', '2017-12-12 21:11:59.890662+02:00','2017-12-12 21:11:59.890662+02:00','2017-12-12 21:11:59.890662+02:00', 'C', NULL, NULL),
-(7, '6c0d7db9-076b-4edc-ab4b-38576ae394fc', 2, TRUE, 7, 2, '{}', '[]', '2017-08-13 13:11:59.890662+02:00','2017-08-14 16:11:59.890662+02:00', NULL, 'W', NULL, NULL);
+'2017-10-10 21:11:59.890662+02:00','2017-10-10 21:11:59.890662+02:00','2017-10-10 21:11:59.890662+02:00', 'C', NULL),
+(5, 'abed67d2-06b8-4749-8bb9-ecda037b673b', 3, TRUE, 7, 2, '{}', '[]', '2017-10-10 21:11:59.890663+02:00','2017-10-10 21:11:59.890662+02:00','2017-10-10 21:11:59.890662+02:00', 'C', NULL),
+(6, '6262eefe-a6e9-4201-9b76-a7f25e3b7f29', 3, TRUE, 7, 2, '{}', '[]', '2017-12-12 21:11:59.890662+02:00','2017-12-12 21:11:59.890662+02:00','2017-12-12 21:11:59.890662+02:00', 'C', NULL),
+(7, '6c0d7db9-076b-4edc-ab4b-38576ae394fc', 2, TRUE, 7, 2, '{}', '[]', '2017-08-13 13:11:59.890662+02:00','2017-08-14 16:11:59.890662+02:00', NULL, 'W', NULL);
 
 -- update run #5 to have a path longer than 500 steps
 UPDATE flows_flowrun SET path = s.path FROM (
