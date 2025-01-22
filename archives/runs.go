@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 	"github.com/jmoiron/sqlx"
 	"github.com/nyaruka/gocommon/dates"
+	"github.com/nyaruka/rp-archiver/runtime"
 )
 
 const (
@@ -24,36 +24,47 @@ const (
 const sqlLookupRuns = `
 SELECT rec.uuid, rec.exited_on, row_to_json(rec)
 FROM (
-   SELECT
-	 fr.id as id,
-	 fr.uuid as uuid,
-     row_to_json(flow_struct) AS flow,
-     row_to_json(contact_struct) AS contact,
-     fr.responded,
-     (SELECT coalesce(jsonb_agg(path_data), '[]'::jsonb) from (
-		SELECT path_row ->> 'node_uuid' AS node, (path_row ->> 'arrived_on')::timestamptz as time
-		FROM jsonb_array_elements(fr.path::jsonb) AS path_row LIMIT 500) as path_data
-     ) as path,
-     (SELECT coalesce(jsonb_object_agg(values_data.key, values_data.value), '{}'::jsonb) from (
-		SELECT key, jsonb_build_object('name', value -> 'name', 'value', value -> 'value', 'input', value -> 'input', 'time', (value -> 'created_on')::text::timestamptz, 'category', value -> 'category', 'node', value -> 'node_uuid') as value
-		FROM jsonb_each(fr.results::jsonb)) AS values_data
-	 ) as values,
-     fr.created_on,
-     fr.modified_on,
-	 fr.exited_on,
-     CASE
-        WHEN status = 'C' THEN 'completed'
-        WHEN status = 'I' THEN 'interrupted'
-        WHEN status = 'X' THEN 'expired'
-        WHEN status = 'F' THEN 'failed'
-        ELSE NULL
-	 END as exit_type
+	SELECT
+		fr.id as id,
+		fr.uuid as uuid,
+		row_to_json(flow_struct) AS flow,
+		row_to_json(contact_struct) AS contact,
+		fr.responded,
+		(SELECT CASE
+			WHEN (fr.path_nodes IS NOT NULL AND fr.path_times IS NOT NULL)
+			THEN (
+				SELECT coalesce(jsonb_agg(path_data), '[]'::jsonb)
+				FROM (
+					SELECT node, time
+					FROM unnest(fr.path_nodes::text[] , fr.path_times::timestamptz[]) x(node, time) LIMIT 500)
+					as path_data)
+			ELSE (
+				SELECT coalesce(jsonb_agg(path_data), '[]'::jsonb)
+				FROM (
+					SELECT path_row ->> 'node_uuid' AS node, (path_row ->> 'arrived_on')::timestamptz as time
+					FROM jsonb_array_elements(fr.path::jsonb) AS path_row LIMIT 500)
+					as path_data)
+		END as path),
+		(SELECT coalesce(jsonb_object_agg(values_data.key, values_data.value), '{}'::jsonb) from (
+			SELECT key, jsonb_build_object('name', value -> 'name', 'value', value -> 'value', 'input', value -> 'input', 'time', (value -> 'created_on')::text::timestamptz, 'category', value -> 'category', 'node', value -> 'node_uuid') as value
+			FROM jsonb_each(fr.results::jsonb)) AS values_data
+		) as values,
+		fr.created_on,
+		fr.modified_on,
+		fr.exited_on,
+		CASE
+			WHEN status = 'C' THEN 'completed'
+			WHEN status = 'I' THEN 'interrupted'
+			WHEN status = 'X' THEN 'expired'
+			WHEN status = 'F' THEN 'failed'
+			ELSE NULL
+		END as exit_type
 
-   FROM flows_flowrun fr
-   JOIN LATERAL (SELECT uuid, name FROM flows_flow WHERE flows_flow.id = fr.flow_id) AS flow_struct ON True
-   JOIN LATERAL (SELECT uuid, name FROM contacts_contact cc WHERE cc.id = fr.contact_id) AS contact_struct ON True
-   WHERE fr.org_id = $1 AND fr.modified_on >= $2 AND fr.modified_on < $3
-   ORDER BY fr.modified_on ASC, id ASC
+	FROM flows_flowrun fr
+	JOIN LATERAL (SELECT uuid, name FROM flows_flow WHERE flows_flow.id = fr.flow_id) AS flow_struct ON True
+	JOIN LATERAL (SELECT uuid, name FROM contacts_contact cc WHERE cc.id = fr.contact_id) AS contact_struct ON True
+	WHERE fr.org_id = $1 AND fr.modified_on >= $2 AND fr.modified_on < $3
+	ORDER BY fr.modified_on ASC, id ASC
 ) as rec;`
 
 // writeRunRecords writes the runs in the archive's date range to the passed in writer
@@ -105,7 +116,7 @@ DELETE FROM flows_flowrun WHERE id IN(?)`
 // all the runs in the archive date range, and if equal or fewer than the number archived, deletes them 100 at a time
 //
 // Upon completion it updates the needs_deletion flag on the archive
-func DeleteArchivedRuns(ctx context.Context, config *Config, db *sqlx.DB, s3Client s3iface.S3API, archive *Archive) error {
+func DeleteArchivedRuns(ctx context.Context, rt *runtime.Runtime, archive *Archive) error {
 	outer, cancel := context.WithTimeout(ctx, time.Hour*3)
 	defer cancel()
 
@@ -121,7 +132,7 @@ func DeleteArchivedRuns(ctx context.Context, config *Config, db *sqlx.DB, s3Clie
 	log.Info("deleting runs")
 
 	// first things first, make sure our file is correct on S3
-	s3Size, s3Hash, err := GetS3FileInfo(outer, s3Client, archive.URL)
+	s3Size, s3Hash, err := GetS3FileInfo(outer, rt.S3, archive.URL)
 	if err != nil {
 		return err
 	}
@@ -131,12 +142,12 @@ func DeleteArchivedRuns(ctx context.Context, config *Config, db *sqlx.DB, s3Clie
 	}
 
 	// if S3 hash is MD5 then check against archive hash
-	if config.CheckS3Hashes && archive.Size <= maxSingleUploadBytes && s3Hash != archive.Hash {
+	if rt.Config.CheckS3Hashes && archive.Size <= maxSingleUploadBytes && s3Hash != archive.Hash {
 		return fmt.Errorf("archive md5: %s and s3 etag: %s do not match", archive.Hash, s3Hash)
 	}
 
 	// ok, archive file looks good, let's build up our list of run ids, this may be big but we are int64s so shouldn't be too big
-	rows, err := db.QueryxContext(outer, sqlSelectOrgRunsInRange, archive.OrgID, archive.StartDate, archive.endDate())
+	rows, err := rt.DB.QueryxContext(outer, sqlSelectOrgRunsInRange, archive.OrgID, archive.StartDate, archive.endDate())
 	if err != nil {
 		return err
 	}
@@ -179,7 +190,7 @@ func DeleteArchivedRuns(ctx context.Context, config *Config, db *sqlx.DB, s3Clie
 		start := dates.Now()
 
 		// start our transaction
-		tx, err := db.BeginTxx(ctx, nil)
+		tx, err := rt.DB.BeginTxx(ctx, nil)
 		if err != nil {
 			return err
 		}
@@ -207,7 +218,7 @@ func DeleteArchivedRuns(ctx context.Context, config *Config, db *sqlx.DB, s3Clie
 	deletedOn := dates.Now()
 
 	// all went well! mark our archive as no longer needing deletion
-	_, err = db.ExecContext(outer, sqlUpdateArchiveDeleted, archive.ID, deletedOn)
+	_, err = rt.DB.ExecContext(outer, sqlUpdateArchiveDeleted, archive.ID, deletedOn)
 	if err != nil {
 		return fmt.Errorf("error setting archive as deleted: %w", err)
 	}
@@ -226,11 +237,11 @@ const selectOldOrgFlowStarts = `
   LIMIT 1000000;`
 
 // DeleteFlowStarts deletes all starts older than 90 days for the passed in org which have no associated runs
-func DeleteFlowStarts(ctx context.Context, now time.Time, config *Config, db *sqlx.DB, org Org) error {
+func DeleteFlowStarts(ctx context.Context, rt *runtime.Runtime, now time.Time, org Org) error {
 	start := dates.Now()
 	threshhold := now.AddDate(0, 0, -org.RetentionPeriod)
 
-	rows, err := db.QueryxContext(ctx, selectOldOrgFlowStarts, org.ID, threshhold)
+	rows, err := rt.DB.QueryxContext(ctx, selectOldOrgFlowStarts, org.ID, threshhold)
 	if err != nil {
 		return err
 	}
@@ -253,7 +264,7 @@ func DeleteFlowStarts(ctx context.Context, now time.Time, config *Config, db *sq
 		}
 
 		// we delete starts in a transaction per start
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := rt.DB.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("error starting transaction while deleting start: %d: %w", startID, err)
 		}

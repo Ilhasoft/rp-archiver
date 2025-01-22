@@ -8,14 +8,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 	"github.com/getsentry/sentry-go"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"github.com/nyaruka/ezconf"
-	"github.com/nyaruka/gocommon/analytics"
+	"github.com/nyaruka/gocommon/aws/cwatch"
 	"github.com/nyaruka/gocommon/dates"
 	"github.com/nyaruka/rp-archiver/archives"
+	"github.com/nyaruka/rp-archiver/runtime"
 	slogmulti "github.com/samber/slog-multi"
 	slogsentry "github.com/samber/slog-sentry"
 )
@@ -27,7 +27,7 @@ var (
 )
 
 func main() {
-	config := archives.NewDefaultConfig()
+	config := runtime.NewDefaultConfig()
 	loader := ezconf.NewLoader(&config, "archiver", "Archives RapidPro runs and msgs to S3", []string{"archiver.toml"})
 	loader.MustLoad()
 
@@ -84,17 +84,20 @@ func main() {
 		config.DB += "?TimeZone=UTC"
 	}
 
-	db, err := sqlx.Open("postgres", config.DB)
+	rt := &runtime.Runtime{
+		Config: config,
+	}
+
+	rt.DB, err = sqlx.Open("postgres", config.DB)
 	if err != nil {
 		logger.Error("error connecting to db", "error", err)
 	} else {
-		db.SetMaxOpenConns(2)
+		rt.DB.SetMaxOpenConns(2)
 		logger.Info("db ok", "state", "starting")
 	}
 
-	var s3Client s3iface.S3API
 	if config.UploadToS3 {
-		s3Client, err = archives.NewS3Client(config)
+		rt.S3, err = archives.NewS3Client(config)
 		if err != nil {
 			logger.Error("unable to initialize s3 client", "error", err)
 		} else {
@@ -118,15 +121,15 @@ func main() {
 		logger.Error("invalid start time supplied, format: HH:MM", "error", err)
 	}
 
-	// if we have a librato token, configure it
-	if config.LibratoToken != "" {
-		analytics.RegisterBackend(analytics.NewLibrato(config.LibratoUsername, config.LibratoToken, config.InstanceName, time.Second, wg))
+	rt.CW, err = cwatch.NewService(config.AWSAccessKeyID, config.AWSSecretAccessKey, config.AWSRegion, config.CloudwatchNamespace, config.DeploymentID)
+	if err != nil {
+		logger.Error("unable to create cloudwatch service", "error", err)
+	} else {
+		logger.Info("cloudwatch service ok", "state", "starting")
 	}
 
-	analytics.Start()
-
 	if config.Once {
-		doArchival(db, config, s3Client)
+		doArchival(rt)
 	} else {
 		for {
 			nextArchival := getNextArchivalTime(timeOfDay)
@@ -135,18 +138,17 @@ func main() {
 			logger.Info("sleeping until next archival", "sleep_time", napTime, "next_archival", nextArchival)
 			time.Sleep(napTime)
 
-			doArchival(db, config, s3Client)
+			doArchival(rt)
 		}
 	}
 
-	analytics.Stop()
 	wg.Wait()
 }
 
-func doArchival(db *sqlx.DB, cfg *archives.Config, s3Client s3iface.S3API) {
+func doArchival(rt *runtime.Runtime) {
 	for {
 		// try to archive all active orgs, and if it fails, wait 5 minutes and try again
-		err := archives.ArchiveActiveOrgs(db, cfg, s3Client)
+		err := archives.ArchiveActiveOrgs(rt)
 		if err != nil {
 			slog.Error("error archiving, will retry in 5 minutes", "error", err)
 			time.Sleep(time.Minute * 5)

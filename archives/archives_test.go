@@ -11,54 +11,67 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
-	"github.com/nyaruka/ezconf"
-	"github.com/nyaruka/gocommon/analytics"
-	"github.com/nyaruka/gocommon/dates"
+	"github.com/nyaruka/gocommon/aws/cwatch"
+	"github.com/nyaruka/rp-archiver/runtime"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func setup(t *testing.T) *sqlx.DB {
-	testDB, err := os.ReadFile("../testdb.sql")
-	assert.NoError(t, err)
+func setup(t *testing.T) (context.Context, *runtime.Runtime) {
+	ctx := context.Background()
+	config := runtime.NewDefaultConfig()
+	config.DB = "postgres://archiver_test:temba@localhost:5432/archiver_test?sslmode=disable&TimeZone=UTC"
 
-	db, err := sqlx.Open("postgres", "postgres://archiver_test:temba@localhost:5432/archiver_test?sslmode=disable&TimeZone=UTC")
-	assert.NoError(t, err)
+	// configure S3 to use a local minio instance
+	config.AWSAccessKeyID = "root"
+	config.AWSSecretAccessKey = "tembatemba"
+	config.S3Endpoint = "http://localhost:9000"
+	config.S3Minio = true
+	config.DeploymentID = "test"
+
+	testDB, err := os.ReadFile("../testdb.sql")
+	require.NoError(t, err)
+
+	db, err := sqlx.Open("postgres", config.DB)
+	require.NoError(t, err)
 
 	_, err = db.Exec(string(testDB))
-	assert.NoError(t, err)
+	require.NoError(t, err)
+
+	s3Client, err := NewS3Client(config)
+	require.NoError(t, err)
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	return db
+	CW, err := cwatch.NewService(config.AWSAccessKeyID, config.AWSSecretAccessKey, config.AWSRegion, config.CloudwatchNamespace, config.DeploymentID)
+	require.NoError(t, err)
+
+	return ctx, &runtime.Runtime{Config: config, DB: db, S3: s3Client, CW: CW}
 }
 
 func TestGetMissingDayArchives(t *testing.T) {
-	db := setup(t)
+	ctx, rt := setup(t)
 
-	// get the tasks for our org
-	ctx := context.Background()
-	config := NewDefaultConfig()
-
-	orgs, err := GetActiveOrgs(ctx, db, config)
+	orgs, err := GetActiveOrgs(ctx, rt)
 	assert.NoError(t, err)
 	assert.Len(t, orgs, 3)
 
 	now := time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)
 
 	// org 1 is too new, no tasks
-	tasks, err := GetMissingDailyArchives(ctx, db, now, orgs[0], MessageType)
+	tasks, err := GetMissingDailyArchives(ctx, rt.DB, now, orgs[0], MessageType)
 	assert.NoError(t, err)
 	assert.Len(t, tasks, 0)
 
 	// org 2 should have some
-	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[1], MessageType)
+	tasks, err = GetMissingDailyArchives(ctx, rt.DB, now, orgs[1], MessageType)
 	assert.NoError(t, err)
 	assert.Len(t, tasks, 61)
 	assert.Equal(t, time.Date(2017, 8, 10, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
 	assert.Equal(t, time.Date(2017, 10, 10, 0, 0, 0, 0, time.UTC), tasks[60].StartDate)
 
 	// org 3 is the same as 2, but two of the tasks have already been built
-	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[2], MessageType)
+	tasks, err = GetMissingDailyArchives(ctx, rt.DB, now, orgs[2], MessageType)
 	assert.NoError(t, err)
 	assert.Len(t, tasks, 31)
 	assert.Equal(t, time.Date(2017, 8, 11, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
@@ -67,13 +80,13 @@ func TestGetMissingDayArchives(t *testing.T) {
 
 	// org 3 again, but changing the archive period so we have no tasks
 	orgs[2].RetentionPeriod = 200
-	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[2], MessageType)
+	tasks, err = GetMissingDailyArchives(ctx, rt.DB, now, orgs[2], MessageType)
 	assert.NoError(t, err)
 	assert.Len(t, tasks, 0)
 
 	// org 1 again, but lowering the archive period so we have tasks
 	orgs[0].RetentionPeriod = 2
-	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[0], MessageType)
+	tasks, err = GetMissingDailyArchives(ctx, rt.DB, now, orgs[0], MessageType)
 	assert.NoError(t, err)
 	assert.Len(t, tasks, 58)
 	assert.Equal(t, time.Date(2017, 11, 10, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
@@ -83,31 +96,27 @@ func TestGetMissingDayArchives(t *testing.T) {
 }
 
 func TestGetMissingMonthArchives(t *testing.T) {
-	db := setup(t)
+	ctx, rt := setup(t)
 
-	// get the tasks for our org
-	ctx := context.Background()
-	config := NewDefaultConfig()
-
-	orgs, err := GetActiveOrgs(ctx, db, config)
+	orgs, err := GetActiveOrgs(ctx, rt)
 	assert.NoError(t, err)
 
 	now := time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)
 
 	// org 1 is too new, no tasks
-	tasks, err := GetMissingMonthlyArchives(ctx, db, now, orgs[0], MessageType)
+	tasks, err := GetMissingMonthlyArchives(ctx, rt.DB, now, orgs[0], MessageType)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, len(tasks))
 
 	// org 2 should have some
-	tasks, err = GetMissingMonthlyArchives(ctx, db, now, orgs[1], MessageType)
+	tasks, err = GetMissingMonthlyArchives(ctx, rt.DB, now, orgs[1], MessageType)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, len(tasks))
 	assert.Equal(t, time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
 	assert.Equal(t, time.Date(2017, 9, 1, 0, 0, 0, 0, time.UTC), tasks[1].StartDate)
 
 	// org 3 is the same as 2, but two of the tasks have already been built
-	tasks, err = GetMissingMonthlyArchives(ctx, db, now, orgs[2], MessageType)
+	tasks, err = GetMissingMonthlyArchives(ctx, rt.DB, now, orgs[2], MessageType)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(tasks))
 	assert.Equal(t, time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
@@ -115,24 +124,22 @@ func TestGetMissingMonthArchives(t *testing.T) {
 }
 
 func TestCreateMsgArchive(t *testing.T) {
-	db := setup(t)
-	ctx := context.Background()
+	ctx, rt := setup(t)
 
 	err := EnsureTempArchiveDirectory("/tmp")
 	assert.NoError(t, err)
 
-	config := NewDefaultConfig()
-	orgs, err := GetActiveOrgs(ctx, db, config)
+	orgs, err := GetActiveOrgs(ctx, rt)
 	assert.NoError(t, err)
 	now := time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)
 
-	tasks, err := GetMissingDailyArchives(ctx, db, now, orgs[1], MessageType)
+	tasks, err := GetMissingDailyArchives(ctx, rt.DB, now, orgs[1], MessageType)
 	assert.NoError(t, err)
 	assert.Equal(t, 61, len(tasks))
 	task := tasks[0]
 
 	// build our first task, should have no messages
-	err = CreateArchiveFile(ctx, db, task, "/tmp")
+	err = CreateArchiveFile(ctx, rt.DB, task, "/tmp")
 	assert.NoError(t, err)
 
 	// should have no records and be an empty gzip file
@@ -144,7 +151,7 @@ func TestCreateMsgArchive(t *testing.T) {
 
 	// build our third task, should have two messages
 	task = tasks[2]
-	err = CreateArchiveFile(ctx, db, task, "/tmp")
+	err = CreateArchiveFile(ctx, rt.DB, task, "/tmp")
 	assert.NoError(t, err)
 
 	// should have two records, second will have attachments
@@ -159,12 +166,12 @@ func TestCreateMsgArchive(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 
 	// test the anonymous case
-	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[2], MessageType)
+	tasks, err = GetMissingDailyArchives(ctx, rt.DB, now, orgs[2], MessageType)
 	assert.NoError(t, err)
 	assert.Equal(t, 31, len(tasks))
 	task = tasks[0]
 
-	err = CreateArchiveFile(ctx, db, task, "/tmp")
+	err = CreateArchiveFile(ctx, rt.DB, task, "/tmp")
 	assert.NoError(t, err)
 
 	// should have one record
@@ -192,23 +199,21 @@ func assertArchiveFile(t *testing.T, archive *Archive, truthName string) {
 }
 
 func TestCreateRunArchive(t *testing.T) {
-	db := setup(t)
-	ctx := context.Background()
+	ctx, rt := setup(t)
 
 	err := EnsureTempArchiveDirectory("/tmp")
 	assert.NoError(t, err)
 
-	config := NewDefaultConfig()
-	orgs, err := GetActiveOrgs(ctx, db, config)
+	orgs, err := GetActiveOrgs(ctx, rt)
 	assert.NoError(t, err)
 	now := time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)
 
-	tasks, err := GetMissingDailyArchives(ctx, db, now, orgs[1], RunType)
+	tasks, err := GetMissingDailyArchives(ctx, rt.DB, now, orgs[1], RunType)
 	assert.NoError(t, err)
 	assert.Equal(t, 62, len(tasks))
 	task := tasks[0]
 
-	err = CreateArchiveFile(ctx, db, task, "/tmp")
+	err = CreateArchiveFile(ctx, rt.DB, task, "/tmp")
 	assert.NoError(t, err)
 
 	// should have no records and be an empty gzip file
@@ -219,13 +224,13 @@ func TestCreateRunArchive(t *testing.T) {
 	DeleteArchiveFile(task)
 
 	task = tasks[2]
-	err = CreateArchiveFile(ctx, db, task, "/tmp")
+	err = CreateArchiveFile(ctx, rt.DB, task, "/tmp")
 	assert.NoError(t, err)
 
 	// should have two record
-	assert.Equal(t, 2, task.RecordCount)
-	assert.Equal(t, int64(458), task.Size)
-	assert.Equal(t, "7220a13c19f5b6065e7d4c419c114635", task.Hash)
+	assert.Equal(t, 3, task.RecordCount)
+	assert.Equal(t, int64(578), task.Size)
+	assert.Equal(t, "cd8ce82019986ac1f4ec1482aac7bca0", task.Hash)
 	assertArchiveFile(t, task, "runs1.jsonl")
 
 	DeleteArchiveFile(task)
@@ -233,13 +238,13 @@ func TestCreateRunArchive(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 
 	// ok, let's do an anon org
-	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[2], RunType)
+	tasks, err = GetMissingDailyArchives(ctx, rt.DB, now, orgs[2], RunType)
 	assert.NoError(t, err)
 	assert.Equal(t, 62, len(tasks))
 	task = tasks[0]
 
 	// build our first task, should have no messages
-	err = CreateArchiveFile(ctx, db, task, "/tmp")
+	err = CreateArchiveFile(ctx, rt.DB, task, "/tmp")
 	assert.NoError(t, err)
 
 	// should have one record
@@ -252,18 +257,16 @@ func TestCreateRunArchive(t *testing.T) {
 }
 
 func TestWriteArchiveToDB(t *testing.T) {
-	db := setup(t)
-	ctx := context.Background()
+	ctx, rt := setup(t)
 
-	config := NewDefaultConfig()
-	orgs, err := GetActiveOrgs(ctx, db, config)
+	orgs, err := GetActiveOrgs(ctx, rt)
 	assert.NoError(t, err)
 	now := time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)
 
-	existing, err := GetCurrentArchives(ctx, db, orgs[2], MessageType)
+	existing, err := GetCurrentArchives(ctx, rt.DB, orgs[2], MessageType)
 	assert.NoError(t, err)
 
-	tasks, err := GetMissingDailyArchives(ctx, db, now, orgs[2], MessageType)
+	tasks, err := GetMissingDailyArchives(ctx, rt.DB, now, orgs[2], MessageType)
 	assert.NoError(t, err)
 	assert.Equal(t, 31, len(tasks))
 	assert.Equal(t, time.Date(2017, 8, 11, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
@@ -271,19 +274,19 @@ func TestWriteArchiveToDB(t *testing.T) {
 	task := tasks[0]
 	task.Dailies = []*Archive{existing[0], existing[1]}
 
-	err = WriteArchiveToDB(ctx, db, task)
+	err = WriteArchiveToDB(ctx, rt.DB, task)
 
 	assert.NoError(t, err)
 	assert.Equal(t, 5, task.ID)
 	assert.Equal(t, false, task.NeedsDeletion)
 
 	// if we recalculate our tasks, we should have one less now
-	existing, err = GetCurrentArchives(ctx, db, orgs[2], MessageType)
+	existing, err = GetCurrentArchives(ctx, rt.DB, orgs[2], MessageType)
 	assert.Equal(t, task.ID, *existing[0].Rollup)
 	assert.Equal(t, task.ID, *existing[2].Rollup)
 
 	assert.NoError(t, err)
-	tasks, err = GetMissingDailyArchives(ctx, db, now, orgs[2], MessageType)
+	tasks, err = GetMissingDailyArchives(ctx, rt.DB, now, orgs[2], MessageType)
 	assert.NoError(t, err)
 	assert.Equal(t, 30, len(tasks))
 	assert.Equal(t, time.Date(2017, 8, 12, 0, 0, 0, 0, time.UTC), tasks[0].StartDate)
@@ -305,102 +308,90 @@ func getCountInRange(db *sqlx.DB, query string, orgID int, start time.Time, end 
 }
 
 func TestArchiveOrgMessages(t *testing.T) {
-	db := setup(t)
-	ctx := context.Background()
+	ctx, rt := setup(t)
+
 	deleteTransactionSize = 1
 
-	config := NewDefaultConfig()
-	orgs, err := GetActiveOrgs(ctx, db, config)
+	orgs, err := GetActiveOrgs(ctx, rt)
 	assert.NoError(t, err)
 	now := time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)
 
-	os.Args = []string{"rp-archiver"}
+	rt.Config.Delete = true
 
-	loader := ezconf.NewLoader(&config, "archiver", "Archives RapidPro runs and msgs to S3", nil)
-	loader.MustLoad()
+	assertCount(t, rt.DB, 4, `SELECT count(*) from msgs_broadcast WHERE org_id = $1`, 2)
 
-	config.Delete = true
+	dailiesCreated, dailiesFailed, monthliesCreated, monthliesFailed, deleted, err := ArchiveOrg(ctx, rt, now, orgs[1], MessageType)
+	assert.NoError(t, err)
 
-	// AWS S3 config in the environment needed to download from S3
-	if config.AWSAccessKeyID != "" && config.AWSSecretAccessKey != "" {
-		s3Client, err := NewS3Client(config)
-		assert.NoError(t, err)
+	assert.Equal(t, 61, len(dailiesCreated))
+	assertArchive(t, dailiesCreated[0], time.Date(2017, 8, 10, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
+	assertArchive(t, dailiesCreated[1], time.Date(2017, 8, 11, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
+	assertArchive(t, dailiesCreated[2], time.Date(2017, 8, 12, 0, 0, 0, 0, time.UTC), DayPeriod, 3, 522, "c2c12d94eb758a3c06c5c4e0706934ff")
+	assertArchive(t, dailiesCreated[3], time.Date(2017, 8, 13, 0, 0, 0, 0, time.UTC), DayPeriod, 1, 311, "9eaec21e28af92bc338d9b6bcd712109")
+	assertArchive(t, dailiesCreated[4], time.Date(2017, 8, 14, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
 
-		assertCount(t, db, 4, `SELECT count(*) from msgs_broadcast WHERE org_id = $1`, 2)
+	assert.Equal(t, 0, len(dailiesFailed))
 
-		dailiesCreated, dailiesFailed, monthliesCreated, monthliesFailed, deleted, err := ArchiveOrg(ctx, now, config, db, s3Client, orgs[1], MessageType)
-		assert.NoError(t, err)
+	assert.Equal(t, 2, len(monthliesCreated))
+	assertArchive(t, monthliesCreated[0], time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 4, 545, "d4ce6331f3c871d394ed3b916144ac85")
+	assertArchive(t, monthliesCreated[1], time.Date(2017, 9, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
 
-		assert.Equal(t, 61, len(dailiesCreated))
-		assertArchive(t, dailiesCreated[0], time.Date(2017, 8, 10, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
-		assertArchive(t, dailiesCreated[1], time.Date(2017, 8, 11, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
-		assertArchive(t, dailiesCreated[2], time.Date(2017, 8, 12, 0, 0, 0, 0, time.UTC), DayPeriod, 3, 522, "c2c12d94eb758a3c06c5c4e0706934ff")
-		assertArchive(t, dailiesCreated[3], time.Date(2017, 8, 13, 0, 0, 0, 0, time.UTC), DayPeriod, 1, 311, "9eaec21e28af92bc338d9b6bcd712109")
-		assertArchive(t, dailiesCreated[4], time.Date(2017, 8, 14, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
+	assert.Equal(t, 0, len(monthliesFailed))
 
-		assert.Equal(t, 0, len(dailiesFailed))
+	assert.Equal(t, 63, len(deleted))
+	assert.Equal(t, time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), deleted[0].StartDate)
+	assert.Equal(t, MonthPeriod, deleted[0].Period)
 
-		assert.Equal(t, 2, len(monthliesCreated))
-		assertArchive(t, monthliesCreated[0], time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 4, 545, "d4ce6331f3c871d394ed3b916144ac85")
-		assertArchive(t, monthliesCreated[1], time.Date(2017, 9, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
-
-		assert.Equal(t, 0, len(monthliesFailed))
-
-		assert.Equal(t, 63, len(deleted))
-		assert.Equal(t, time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), deleted[0].StartDate)
-		assert.Equal(t, MonthPeriod, deleted[0].Period)
-
-		// shouldn't have any messages remaining for this org for those periods
-		for _, d := range deleted {
-			count, err := getCountInRange(
-				db,
-				getMsgCount,
-				orgs[1].ID,
-				d.StartDate,
-				d.endDate(),
-			)
-			assert.NoError(t, err)
-			assert.Equal(t, 0, count)
-			assert.False(t, d.NeedsDeletion)
-			assert.NotNil(t, d.DeletedOn)
-		}
-
-		// our one message in our existing archive (but that had an invalid URL) should still exist however
+	// shouldn't have any messages remaining for this org for those periods
+	for _, d := range deleted {
 		count, err := getCountInRange(
-			db,
+			rt.DB,
 			getMsgCount,
 			orgs[1].ID,
-			time.Date(2017, 10, 8, 0, 0, 0, 0, time.UTC),
-			time.Date(2017, 10, 9, 0, 0, 0, 0, time.UTC),
+			d.StartDate,
+			d.endDate(),
 		)
 		assert.NoError(t, err)
-		assert.Equal(t, 1, count)
-
-		// and messages on our other orgs should be unaffected
-		count, err = getCountInRange(
-			db,
-			getMsgCount,
-			orgs[2].ID,
-			time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC),
-			time.Date(2020, 2, 1, 0, 0, 0, 0, time.UTC),
-		)
-		assert.NoError(t, err)
-		assert.Equal(t, 1, count)
-
-		// as is our newer message which was replied to
-		count, err = getCountInRange(
-			db,
-			getMsgCount,
-			orgs[1].ID,
-			time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC),
-			time.Date(2018, 2, 1, 0, 0, 0, 0, time.UTC),
-		)
-		assert.NoError(t, err)
-		assert.Equal(t, 1, count)
-
-		// one broadcast still exists because it has a schedule, the other because it still has msgs, the last because it is new
-		assertCount(t, db, 3, `SELECT count(*) from msgs_broadcast WHERE org_id = $1`, 2)
+		assert.Equal(t, 0, count)
+		assert.False(t, d.NeedsDeletion)
+		assert.NotNil(t, d.DeletedOn)
 	}
+
+	// our one message in our existing archive (but that had an invalid URL) should still exist however
+	count, err := getCountInRange(
+		rt.DB,
+		getMsgCount,
+		orgs[1].ID,
+		time.Date(2017, 10, 8, 0, 0, 0, 0, time.UTC),
+		time.Date(2017, 10, 9, 0, 0, 0, 0, time.UTC),
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	// and messages on our other orgs should be unaffected
+	count, err = getCountInRange(
+		rt.DB,
+		getMsgCount,
+		orgs[2].ID,
+		time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2020, 2, 1, 0, 0, 0, 0, time.UTC),
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	// as is our newer message which was replied to
+	count, err = getCountInRange(
+		rt.DB,
+		getMsgCount,
+		orgs[1].ID,
+		time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2018, 2, 1, 0, 0, 0, 0, time.UTC),
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	// one broadcast still exists because it has a schedule, the other because it still has msgs, the last because it is new
+	assertCount(t, rt.DB, 3, `SELECT count(*) from msgs_broadcast WHERE org_id = $1`, 2)
 }
 
 const getRunCount = `
@@ -425,133 +416,87 @@ func assertArchive(t *testing.T, a *Archive, startDate time.Time, period Archive
 }
 
 func TestArchiveOrgRuns(t *testing.T) {
-	db := setup(t)
-	ctx := context.Background()
+	ctx, rt := setup(t)
 
-	config := NewDefaultConfig()
-	orgs, err := GetActiveOrgs(ctx, db, config)
+	orgs, err := GetActiveOrgs(ctx, rt)
 	assert.NoError(t, err)
 	now := time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)
 
-	os.Args = []string{"rp-archiver"}
+	rt.Config.Delete = true
 
-	loader := ezconf.NewLoader(&config, "archiver", "Archives RapidPro runs and msgs to S3", nil)
-	loader.MustLoad()
+	dailiesCreated, _, monthliesCreated, _, deleted, err := ArchiveOrg(ctx, rt, now, orgs[2], RunType)
+	assert.NoError(t, err)
 
-	config.Delete = true
+	assert.Equal(t, 10, len(dailiesCreated))
+	assertArchive(t, dailiesCreated[0], time.Date(2017, 10, 1, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
+	assertArchive(t, dailiesCreated[9], time.Date(2017, 10, 10, 0, 0, 0, 0, time.UTC), DayPeriod, 2, 1953, "95475b968ceff15f2f90d539e1bd3d20")
 
-	// AWS S3 config in the environment needed to download from S3
-	if config.AWSAccessKeyID != "" && config.AWSSecretAccessKey != "" {
-		s3Client, err := NewS3Client(config)
-		assert.NoError(t, err)
+	assert.Equal(t, 2, len(monthliesCreated))
+	assertArchive(t, monthliesCreated[0], time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 1, 465, "40abf2113ea7c25c5476ff3025d54b07")
+	assertArchive(t, monthliesCreated[1], time.Date(2017, 9, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
 
-		dailiesCreated, _, monthliesCreated, _, deleted, err := ArchiveOrg(ctx, now, config, db, s3Client, orgs[2], RunType)
-		assert.NoError(t, err)
+	assert.Equal(t, 12, len(deleted))
 
-		assert.Equal(t, 10, len(dailiesCreated))
-		assertArchive(t, dailiesCreated[0], time.Date(2017, 10, 1, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
-		assertArchive(t, dailiesCreated[9], time.Date(2017, 10, 10, 0, 0, 0, 0, time.UTC), DayPeriod, 2, 1953, "95475b968ceff15f2f90d539e1bd3d20")
-
-		assert.Equal(t, 2, len(monthliesCreated))
-		assertArchive(t, monthliesCreated[0], time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 1, 465, "40abf2113ea7c25c5476ff3025d54b07")
-		assertArchive(t, monthliesCreated[1], time.Date(2017, 9, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
-
-		assert.Equal(t, 12, len(deleted))
-
-		// no runs remaining
-		for _, d := range deleted {
-			count, err := getCountInRange(
-				db,
-				getRunCount,
-				orgs[2].ID,
-				d.StartDate,
-				d.endDate(),
-			)
-			assert.NoError(t, err)
-			assert.Equal(t, 0, count)
-
-			assert.False(t, d.NeedsDeletion)
-			assert.NotNil(t, d.DeletedOn)
-		}
-
-		// other org runs unaffected
+	// no runs remaining
+	for _, d := range deleted {
 		count, err := getCountInRange(
-			db,
-			getRunCount,
-			orgs[1].ID,
-			time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC),
-			time.Date(2020, 2, 1, 0, 0, 0, 0, time.UTC),
-		)
-		assert.NoError(t, err)
-		assert.Equal(t, 3, count)
-
-		// more recent run unaffected (even though it was parent)
-		count, err = getCountInRange(
-			db,
+			rt.DB,
 			getRunCount,
 			orgs[2].ID,
-			time.Date(2017, 12, 1, 0, 0, 0, 0, time.UTC),
-			time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC),
+			d.StartDate,
+			d.endDate(),
 		)
 		assert.NoError(t, err)
-		assert.Equal(t, 1, count)
+		assert.Equal(t, 0, count)
 
-		// org 2 has a run that can't be archived because it's still active - as it has no existing archives
-		// this will manifest itself as a monthly which fails to save
-		dailiesCreated, dailiesFailed, monthliesCreated, monthliesFailed, _, err := ArchiveOrg(ctx, now, config, db, s3Client, orgs[1], RunType)
-		assert.NoError(t, err)
-
-		assert.Equal(t, 31, len(dailiesCreated))
-		assertArchive(t, dailiesCreated[0], time.Date(2017, 8, 10, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
-
-		assert.Equal(t, 1, len(dailiesFailed))
-		assertArchive(t, dailiesFailed[0], time.Date(2017, 8, 14, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 0, "")
-
-		assert.Equal(t, 1, len(monthliesCreated))
-		assertArchive(t, monthliesCreated[0], time.Date(2017, 9, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
-
-		assert.Equal(t, 1, len(monthliesFailed))
-		assertArchive(t, monthliesFailed[0], time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 0, 0, "")
+		assert.False(t, d.NeedsDeletion)
+		assert.NotNil(t, d.DeletedOn)
 	}
+
+	// other org runs unaffected
+	count, err := getCountInRange(
+		rt.DB,
+		getRunCount,
+		orgs[1].ID,
+		time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2020, 2, 1, 0, 0, 0, 0, time.UTC),
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, 4, count)
+
+	// more recent run unaffected (even though it was parent)
+	count, err = getCountInRange(
+		rt.DB,
+		getRunCount,
+		orgs[2].ID,
+		time.Date(2017, 12, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC),
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	// org 2 has a run that can't be archived because it's still active - as it has no existing archives
+	// this will manifest itself as a monthly which fails to save
+	dailiesCreated, dailiesFailed, monthliesCreated, monthliesFailed, _, err := ArchiveOrg(ctx, rt, now, orgs[1], RunType)
+	assert.NoError(t, err)
+
+	assert.Equal(t, 31, len(dailiesCreated))
+	assertArchive(t, dailiesCreated[0], time.Date(2017, 8, 10, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
+
+	assert.Equal(t, 1, len(dailiesFailed))
+	assertArchive(t, dailiesFailed[0], time.Date(2017, 8, 14, 0, 0, 0, 0, time.UTC), DayPeriod, 0, 0, "")
+
+	assert.Equal(t, 1, len(monthliesCreated))
+	assertArchive(t, monthliesCreated[0], time.Date(2017, 9, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 0, 23, "f0d79988b7772c003d04a28bd7417a62")
+
+	assert.Equal(t, 1, len(monthliesFailed))
+	assertArchive(t, monthliesFailed[0], time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC), MonthPeriod, 0, 0, "")
 }
 
 func TestArchiveActiveOrgs(t *testing.T) {
-	db := setup(t)
-	config := NewDefaultConfig()
+	_, rt := setup(t)
 
-	os.Args = []string{"rp-archiver"}
-	loader := ezconf.NewLoader(&config, "archiver", "Archives RapidPro runs and msgs to S3", nil)
-	loader.MustLoad()
+	err := ArchiveActiveOrgs(rt)
+	assert.NoError(t, err)
 
-	mockAnalytics := analytics.NewMock()
-	analytics.RegisterBackend(mockAnalytics)
-	analytics.Start()
-
-	dates.SetNowSource(dates.NewSequentialNowSource(time.Date(2018, 1, 8, 12, 30, 0, 0, time.UTC)))
-	defer dates.SetNowSource(dates.DefaultNowSource)
-
-	if config.AWSAccessKeyID != "" && config.AWSSecretAccessKey != "" {
-		s3Client, err := NewS3Client(config)
-		assert.NoError(t, err)
-
-		err = ArchiveActiveOrgs(db, config, s3Client)
-		assert.NoError(t, err)
-
-		assert.Equal(t, map[string][]float64{
-			"archiver.archive_elapsed":       {848.0},
-			"archiver.orgs_archived":         {3},
-			"archiver.msgs_records_archived": {5},
-			"archiver.msgs_archives_created": {92},
-			"archiver.msgs_archives_failed":  {0},
-			"archiver.msgs_rollups_created":  {3},
-			"archiver.msgs_rollups_failed":   {0},
-			"archiver.runs_records_archived": {4},
-			"archiver.runs_archives_created": {41},
-			"archiver.runs_archives_failed":  {1},
-			"archiver.runs_rollups_created":  {3},
-			"archiver.runs_rollups_failed":   {1},
-		}, mockAnalytics.Gauges)
-	}
-
-	analytics.Stop()
 }
