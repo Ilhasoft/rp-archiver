@@ -1,3 +1,7 @@
+1.2.4-archiver-10.0.0
+----------
+ * update to rp-archiver v10.0.0
+
 1.2.4-archiver-9.2.0
 ----------
  * update to rp-arciver v9.2.0
