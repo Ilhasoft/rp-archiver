@@ -1,3 +1,48 @@
+v10.0.0 (2025-01-07)
+-------------------------
+ * Update README.md
+
+v9.3.9 (2024-12-17)
+-------------------------
+ * Fix sending metrics
+
+v9.3.8 (2024-12-16)
+-------------------------
+ * Send metrics to cloudwatch and remove librato
+
+v9.3.7 (2024-12-05)
+-------------------------
+ * Support reading from run.path_nodes and path_times when set
+
+v9.3.6 (2024-08-23)
+-------------------------
+ * Fix uploading archives
+
+v9.3.5 (2024-08-23)
+-------------------------
+ * Improve error messages from failed S3 operations
+
+v9.3.4 (2024-08-22)
+-------------------------
+ * Always strip leading / from S3 keys
+
+v9.3.3 (2024-08-22)
+-------------------------
+ * Update to aws-sdk-go-v2
+
+v9.3.2 (2024-07-26)
+-------------------------
+ * Add runtime.Runtime to hold config, DB and S3
+ * Update to latest gocommon
+
+v9.3.1 (2024-07-25)
+-------------------------
+ * Re-add config option to force path style urls in S3, use minio to emulate S3 for testing
+
+v9.3.0 (2024-07-25)
+-------------------------
+ * Update AWS/S3 config
+
 v9.2.0 (2024-07-17)
 -------------------------
  * Update dependencies
