@@ -1,3 +1,7 @@
+1.2.4-archiver-10.2.0
+----------
+ * update to v10.2.0
+
 1.2.4-archiver-10.0.0
 ----------
  * update to rp-archiver v10.0.0
